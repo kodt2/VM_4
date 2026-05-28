@@ -65,6 +65,7 @@ struct SolveResult {
     double h = 0.0;
     double k = 0.0;
     std::vector<double> values; // одномерное хранение узлов: index(i, j) = j*(n+1)+i
+    std::vector<double> initial_values; // значения после задания граничных условий и начальной интерполяции
     std::size_t iterations = 0;
     double residual_norm = 0.0;     // ||R^(N)||_infinity
     double method_accuracy = 0.0;   // epsilon^(N): max |u_new - u_old| на последней итерации
@@ -111,6 +112,7 @@ public:
         result.values.assign((grid.n + 1) * (grid.m + 1), 0.0);
 
         initialize(result);
+        result.initial_values = result.values;
 
         for (std::size_t iteration = 1; iteration <= params.max_iterations; ++iteration) {
             const double correction_norm = sor_iteration(result, params.omega);
@@ -385,9 +387,9 @@ json result_to_json(const SolveResult& result) {
         {"converged", result.converged}};
 }
 
-json nodes_to_json(const Rectangle& rectangle,
-                   const SolveResult& coarse,
-                   const SolveResult& fine) {
+json common_nodes_to_json(const Rectangle& rectangle,
+                          const SolveResult& coarse,
+                          const SolveResult& fine) {
     json nodes = json::array();
     nodes.get_ref<json::array_t&>().reserve((coarse.grid.n + 1) * (coarse.grid.m + 1));
 
@@ -410,6 +412,33 @@ json nodes_to_json(const Rectangle& rectangle,
     return nodes;
 }
 
+
+json grid_nodes_to_json(const Rectangle& rectangle,
+                        const SolveResult& result,
+                        bool use_initial_values) {
+    const std::vector<double>& values = use_initial_values ? result.initial_values : result.values;
+    if (values.size() != result.values.size()) {
+        throw std::runtime_error("Внутренняя ошибка: массив начального приближения не заполнен");
+    }
+
+    json nodes = json::array();
+    nodes.get_ref<json::array_t&>().reserve((result.grid.n + 1) * (result.grid.m + 1));
+
+    for (std::size_t j = 0; j <= result.grid.m; ++j) {
+        const double y = rectangle.c + static_cast<double>(j) * result.k;
+        for (std::size_t i = 0; i <= result.grid.n; ++i) {
+            const double x = rectangle.a + static_cast<double>(i) * result.h;
+            nodes.push_back({
+                {"i", i},
+                {"j", j},
+                {"x", x},
+                {"y", y},
+                {"value", values[j * (result.grid.n + 1) + i]}});
+        }
+    }
+    return nodes;
+}
+
 json make_success_response(const SolverInput& input,
                            const SolveResult& base_result,
                            const SolveResult& fine_result,
@@ -422,7 +451,9 @@ json make_success_response(const SolverInput& input,
         {"fine", result_to_json(fine_result)},
         {"epsilon2", difference.epsilon2},
         {"max_difference_node", {{"i", difference.i}, {"j", difference.j}, {"x", difference.x}, {"y", difference.y}}},
-        {"nodes", nodes_to_json(input.rectangle, base_result, fine_result)}};
+        {"nodes", common_nodes_to_json(input.rectangle, base_result, fine_result)},
+        {"initial", {{"base", grid_nodes_to_json(input.rectangle, base_result, true)},
+                     {"fine", grid_nodes_to_json(input.rectangle, fine_result, true)}}}};
 }
 
 } // namespace

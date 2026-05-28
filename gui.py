@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractButton,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -25,6 +26,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -46,7 +50,8 @@ class SolverWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Poisson SOR Solver")
-        self.resize(1080, 760)
+        self.resize(1180, 820)
+        self.last_response: dict[str, Any] | None = None
 
         self.binary_path = QLineEdit(str(self._default_binary_path()))
         self.binary_path.setPlaceholderText("Path to poisson_sor / solver.exe")
@@ -108,13 +113,42 @@ class SolverWindow(QMainWindow):
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Здесь появится аналитическая справка и JSON-диагностика…")
 
+        table_tab = QWidget()
+        table_layout = QVBoxLayout(table_tab)
+        table_controls = QHBoxLayout()
+        self.table_data_kind = QComboBox()
+        self.table_data_kind.addItem("v^(N)(x,y): основная сетка", "base")
+        self.table_data_kind.addItem("v2^(N2)(x,y): половинный шаг", "fine")
+        self.table_data_kind.addItem("v^(N)(x,y) - v2^(N2)(x,y)", "difference")
+        self.table_data_kind.currentIndexChanged.connect(self._refresh_table)
+        self.table_stride = QComboBox()
+        for stride in (1, 2, 5, 10):
+            self.table_stride.addItem(f"каждый {stride}-й узел", stride)
+        self.table_stride.currentIndexChanged.connect(self._refresh_table)
+        table_controls.addWidget(QLabel("Данные:"))
+        table_controls.addWidget(self.table_data_kind)
+        table_controls.addSpacing(16)
+        table_controls.addWidget(QLabel("Прореживание:"))
+        table_controls.addWidget(self.table_stride)
+        table_controls.addStretch(1)
+        self.result_table = QTableWidget()
+        self.result_table.setAlternatingRowColors(True)
+        self.result_table.setCornerButtonEnabled(True)
+        table_layout.addLayout(table_controls)
+        table_layout.addWidget(self.result_table)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.log, "Справка")
+        self.tabs.addTab(table_tab, "Таблица результатов")
+
         central = QWidget()
         main_layout = QVBoxLayout(central)
         main_layout.addLayout(binary_layout)
         main_layout.addLayout(settings_grid)
         main_layout.addWidget(self.calculate_button)
-        main_layout.addWidget(self.log, stretch=1)
+        main_layout.addWidget(self.tabs, stretch=1)
         self.setCentralWidget(central)
+        self._set_table_corner_text()
 
     @staticmethod
     def _double_box(
@@ -216,11 +250,13 @@ class SolverWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка JSON", f"Не удалось распарсить stdout: {exc}")
             return
 
+        self.last_response = response
         self.log.setPlainText(self._format_report(request, response))
         if not response.get("ok", False):
             QMessageBox.critical(self, "Ошибка solver", response.get("error", "Неизвестная ошибка"))
             return
 
+        self._refresh_table()
         self._plot_surfaces(response)
 
     @staticmethod
@@ -259,36 +295,81 @@ class SolverWindow(QMainWindow):
         ]
         return "\n".join(lines)
 
-    @staticmethod
-    def _plot_surfaces(response: dict[str, Any]) -> None:
-        nodes = response.get("nodes", [])
-        if not nodes:
+    def _refresh_table(self) -> None:
+        if not self.last_response or not self.last_response.get("ok", False):
             return
 
+        response = self.last_response
         n = int(response["base"]["grid"]["n"])
         m = int(response["base"]["grid"]["m"])
-        x = np.zeros((m + 1, n + 1))
-        y = np.zeros((m + 1, n + 1))
-        base = np.zeros((m + 1, n + 1))
-        fine = np.zeros((m + 1, n + 1))
-        difference = np.zeros((m + 1, n + 1))
+        stride = int(self.table_stride.currentData())
+        value_key = str(self.table_data_kind.currentData())
+        x_indices = self._sample_indices(n, stride)
+        y_indices = self._sample_indices(m, stride)
+        nodes_by_index = {(int(node["i"]), int(node["j"])): node for node in response.get("nodes", [])}
 
-        for node in nodes:
-            i = int(node["i"])
-            j = int(node["j"])
-            x[j, i] = node["x"]
-            y[j, i] = node["y"]
-            base[j, i] = node["base"]
-            fine[j, i] = node["fine"]
-            difference[j, i] = node["difference"]
+        self.result_table.setUpdatesEnabled(False)
+        self.result_table.clear()
+        self.result_table.setRowCount(len(y_indices))
+        self.result_table.setColumnCount(len(x_indices))
+        self.result_table.setHorizontalHeaderLabels(
+            [f"x_{i}\n{nodes_by_index[(i, 0)]['x']:.6g}" for i in x_indices]
+        )
+        self.result_table.setVerticalHeaderLabels(
+            [f"y_{j}\n{nodes_by_index[(0, j)]['y']:.6g}" for j in y_indices]
+        )
 
+        for row, j in enumerate(y_indices):
+            for col, i in enumerate(x_indices):
+                value = float(nodes_by_index[(i, j)][value_key])
+                item = QTableWidgetItem(f"{value:.10e}")
+                item.setToolTip(f"j={j}, i={i}, {value_key}={value:.12e}")
+                self.result_table.setItem(row, col, item)
+
+        self.result_table.resizeColumnsToContents()
+        self.result_table.resizeRowsToContents()
+        self.result_table.setUpdatesEnabled(True)
+        self._set_table_corner_text()
+
+    @staticmethod
+    def _sample_indices(max_index: int, stride: int) -> list[int]:
+        indices = list(range(0, max_index + 1, stride))
+        if indices[-1] != max_index:
+            indices.append(max_index)
+        return indices
+
+    def _set_table_corner_text(self) -> None:
+        corner = self.result_table.findChild(QAbstractButton)
+        if corner is not None:
+            corner.setText("j / i")
+            corner.setToolTip("Строки: y_j; столбцы: x_i")
+
+    @staticmethod
+    def _plot_surfaces(response: dict[str, Any]) -> None:
         surfaces = [
-            ("Численное решение: основная сетка", base, "viridis"),
-            ("Численное решение: половинный шаг (на общих узлах)", fine, "plasma"),
-            ("Разность: base - fine", difference, "coolwarm"),
+            ("Численное решение: основная сетка", SolverWindow._surface_from_common_nodes(response, "base"), "viridis"),
+            (
+                "Численное решение: половинный шаг (на общих узлах)",
+                SolverWindow._surface_from_common_nodes(response, "fine"),
+                "plasma",
+            ),
+            ("Разность: base - fine", SolverWindow._surface_from_common_nodes(response, "difference"), "coolwarm"),
+            (
+                "Начальное приближение: основная сетка",
+                SolverWindow._surface_from_grid_nodes(response.get("initial", {}).get("base", []), response["base"]["grid"]),
+                "viridis",
+            ),
+            (
+                "Начальное приближение: половинный шаг",
+                SolverWindow._surface_from_grid_nodes(response.get("initial", {}).get("fine", []), response["fine"]["grid"]),
+                "plasma",
+            ),
         ]
 
-        for title, z, cmap in surfaces:
+        for title, data, cmap in surfaces:
+            if data is None:
+                continue
+            x, y, z = data
             fig = plt.figure(figsize=(9, 7))
             ax = fig.add_subplot(111, projection="3d")
             surface = ax.plot_surface(x, y, z, cmap=cmap, linewidth=0, antialiased=True)
@@ -299,6 +380,44 @@ class SolverWindow(QMainWindow):
             fig.colorbar(surface, shrink=0.65, aspect=12)
 
         plt.show(block=False)
+
+    @staticmethod
+    def _surface_from_common_nodes(response: dict[str, Any], value_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        nodes = response.get("nodes", [])
+        if not nodes:
+            return None
+
+        grid = response["base"]["grid"]
+        return SolverWindow._surface_from_nodes(nodes, int(grid["n"]), int(grid["m"]), value_key)
+
+    @staticmethod
+    def _surface_from_grid_nodes(
+        nodes: list[dict[str, Any]],
+        grid: dict[str, Any],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if not nodes:
+            return None
+        return SolverWindow._surface_from_nodes(nodes, int(grid["n"]), int(grid["m"]), "value")
+
+    @staticmethod
+    def _surface_from_nodes(
+        nodes: list[dict[str, Any]],
+        n: int,
+        m: int,
+        value_key: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = np.zeros((m + 1, n + 1))
+        y = np.zeros((m + 1, n + 1))
+        z = np.zeros((m + 1, n + 1))
+
+        for node in nodes:
+            i = int(node["i"])
+            j = int(node["j"])
+            x[j, i] = node["x"]
+            y[j, i] = node["y"]
+            z[j, i] = node[value_key]
+
+        return x, y, z
 
 
 def main() -> int:
