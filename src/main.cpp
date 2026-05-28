@@ -13,34 +13,31 @@
 // Замените тела этих функций на правую часть и граничные условия своей задачи.
 // Уравнение: Delta u(x, y) = -f(x, y).
 // -----------------------------------------------------------------------------
+
+const double PI = 3,141592653589793;
+
 double f(double x, double y) {
-    (void)x;
-    (void)y;
-    return 0.0;
+    return (sin( PI * x*y)) * sin( PI * x*y));
 }
 
 // x = a
 double mu_1(double y) {
-    (void)y;
-    return 0.0;
+    return sin(PI*y);
 }
 
 // x = b
 double mu_2(double y) {
-    (void)y;
-    return 0.0;
+   return sin(PI*y);
 }
 
 // y = c
 double mu_3(double x) {
-    (void)x;
-    return 0.0;
+    return x-x*x;
 }
 
 // y = d
 double mu_4(double x) {
-    (void)x;
-    return 0.0;
+    return x-x*x;
 }
 
 struct Rectangle {
