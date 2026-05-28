@@ -8,26 +8,28 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 // -----------------------------------------------------------------------------
 // Заглушки пользовательских функций.
 // Замените тела этих функций на правую часть и граничные условия своей задачи.
 // Уравнение: Delta u(x, y) = -f(x, y).
 // -----------------------------------------------------------------------------
 
-const double PI = 3,141592653589793;
+constexpr double PI = 3.14159265358979323846;
 
 double f(double x, double y) {
-    return (sin( PI * x*y)) * sin( PI * x*y));
+    return std::sin(PI * x * y) * std::sin(PI * x * y);
 }
 
 // x = a
 double mu_1(double y) {
-    return sin(PI*y);
+    return std::sin(PI * y);
 }
 
 // x = b
 double mu_2(double y) {
-   return sin(PI*y);
+    return std::sin(PI * y);
 }
 
 // y = c
@@ -275,49 +277,180 @@ private:
     Boundary mu_top_;
 };
 
-void print_result(const std::string& title, const SolveResult& result) {
-    std::cout << title << '\n';
-    std::cout << "Число итераций N = " << result.iterations << '\n';
-    std::cout << "Невязка ||R^(N)||_inf = " << result.residual_norm << '\n';
-    std::cout << "Норма поправки / точность метода epsilon^(N) = " << result.method_accuracy << '\n';
-    std::cout << "Статус сходимости = " << (result.converged ? "достигнута" : "не достигнута") << '\n';
+
+namespace {
+
+using json = nlohmann::json;
+
+struct SolverInput {
+    Rectangle rectangle;
+    GridSize base_grid;
+    SorParameters base_params;
+    SorParameters fine_params;
+    std::size_t variant = 1;
+};
+
+struct ProblemFunctions {
+    PoissonSolver::RightPart right_part;
+    PoissonSolver::Boundary left;
+    PoissonSolver::Boundary right;
+    PoissonSolver::Boundary bottom;
+    PoissonSolver::Boundary top;
+};
+
+double exact_variant_2(double x, double y) {
+    return std::sin(PI * x) * std::sin(PI * y);
 }
 
+ProblemFunctions make_problem(std::size_t variant, const Rectangle& rectangle) {
+    switch (variant) {
+        case 1:
+            return ProblemFunctions{f, mu_1, mu_2, mu_3, mu_4};
+        case 2:
+            // Delta u = -f, u = sin(pi*x)sin(pi*y) на границе.
+            return ProblemFunctions{
+                [](double x, double y) { return 2.0 * PI * PI * exact_variant_2(x, y); },
+                [rectangle](double y) { return exact_variant_2(rectangle.a, y); },
+                [rectangle](double y) { return exact_variant_2(rectangle.b, y); },
+                [rectangle](double x) { return exact_variant_2(x, rectangle.c); },
+                [rectangle](double x) { return exact_variant_2(x, rectangle.d); }};
+        case 3:
+            return ProblemFunctions{
+                [](double x, double y) { return x * x + y * y; },
+                [](double y) { return y * (1.0 - y); },
+                [](double y) { return y * (1.0 - y); },
+                [](double x) { return x * (1.0 - x); },
+                [](double x) { return x * (1.0 - x); }};
+        default:
+            throw std::invalid_argument("Неизвестный номер варианта");
+    }
+}
+
+std::size_t read_size(const json& object, const char* key) {
+    if (!object.contains(key)) {
+        throw std::invalid_argument(std::string("Отсутствует поле ") + key);
+    }
+    return object.at(key).get<std::size_t>();
+}
+
+double read_double(const json& object, const char* key) {
+    if (!object.contains(key)) {
+        throw std::invalid_argument(std::string("Отсутствует поле ") + key);
+    }
+    return object.at(key).get<double>();
+}
+
+SorParameters parse_params(const json& object) {
+    SorParameters params;
+    params.omega = read_double(object, "omega");
+    if (object.contains("epsilon_mem")) {
+        params.epsilon_mem = object.at("epsilon_mem").get<double>();
+    } else {
+        params.epsilon_mem = read_double(object, "epsilon");
+    }
+    if (object.contains("max_iterations")) {
+        params.max_iterations = object.at("max_iterations").get<std::size_t>();
+    } else {
+        params.max_iterations = read_size(object, "N_max");
+    }
+    return params;
+}
+
+SolverInput parse_input(std::istream& input_stream) {
+    json request;
+    input_stream >> request;
+
+    SolverInput input;
+    const json& rectangle = request.at("rectangle");
+    input.rectangle = Rectangle{
+        read_double(rectangle, "a"),
+        read_double(rectangle, "b"),
+        read_double(rectangle, "c"),
+        read_double(rectangle, "d")};
+
+    const json& grid = request.at("grid");
+    input.base_grid = GridSize{read_size(grid, "n"), read_size(grid, "m")};
+    input.base_params = parse_params(request.at("base"));
+    input.fine_params = parse_params(request.at("fine"));
+    input.variant = request.value("variant", static_cast<std::size_t>(1));
+    return input;
+}
+
+json result_to_json(const SolveResult& result) {
+    return json{
+        {"grid", {{"n", result.grid.n}, {"m", result.grid.m}, {"h", result.h}, {"k", result.k}}},
+        {"iterations", result.iterations},
+        {"residual_norm", result.residual_norm},
+        {"method_accuracy", result.method_accuracy},
+        {"converged", result.converged}};
+}
+
+json nodes_to_json(const Rectangle& rectangle,
+                   const SolveResult& coarse,
+                   const SolveResult& fine) {
+    json nodes = json::array();
+    nodes.get_ref<json::array_t&>().reserve((coarse.grid.n + 1) * (coarse.grid.m + 1));
+
+    for (std::size_t j = 0; j <= coarse.grid.m; ++j) {
+        const double y = rectangle.c + static_cast<double>(j) * coarse.k;
+        for (std::size_t i = 0; i <= coarse.grid.n; ++i) {
+            const double x = rectangle.a + static_cast<double>(i) * coarse.h;
+            const double coarse_value = coarse.values[j * (coarse.grid.n + 1) + i];
+            const double fine_value = fine.values[(2 * j) * (fine.grid.n + 1) + (2 * i)];
+            nodes.push_back({
+                {"i", i},
+                {"j", j},
+                {"x", x},
+                {"y", y},
+                {"base", coarse_value},
+                {"fine", fine_value},
+                {"difference", coarse_value - fine_value}});
+        }
+    }
+    return nodes;
+}
+
+json make_success_response(const SolverInput& input,
+                           const SolveResult& base_result,
+                           const SolveResult& fine_result,
+                           const CommonGridDifference& difference) {
+    return json{
+        {"ok", true},
+        {"variant", input.variant},
+        {"rectangle", {{"a", input.rectangle.a}, {"b", input.rectangle.b}, {"c", input.rectangle.c}, {"d", input.rectangle.d}}},
+        {"base", result_to_json(base_result)},
+        {"fine", result_to_json(fine_result)},
+        {"epsilon2", difference.epsilon2},
+        {"max_difference_node", {{"i", difference.i}, {"j", difference.j}, {"x", difference.x}, {"y", difference.y}}},
+        {"nodes", nodes_to_json(input.rectangle, base_result, fine_result)}};
+}
+
+} // namespace
+
 int main() {
+    std::cout << std::scientific << std::setprecision(10);
+
     try {
-        // ------------------------------------------------------------------
-        // Входные параметры. При необходимости замените значения ниже или
-        // добавьте чтение из файла/консоли.
-        // ------------------------------------------------------------------
-        const Rectangle rectangle{0.0, 1.0, 0.0, 1.0};
-        const GridSize base_grid{20, 20};
-        const SorParameters base_params{1.5, 1e-8, 10000};
-        const SorParameters fine_params{1.7, 1e-8, 20000};
+        const SolverInput input = parse_input(std::cin);
+        const GridSize fine_grid{2 * input.base_grid.n, 2 * input.base_grid.m};
+        const ProblemFunctions problem = make_problem(input.variant, input.rectangle);
 
-        const GridSize fine_grid{2 * base_grid.n, 2 * base_grid.m};
+        PoissonSolver solver(input.rectangle,
+                             problem.right_part,
+                             problem.left,
+                             problem.right,
+                             problem.bottom,
+                             problem.top);
 
-        PoissonSolver solver(rectangle, f, mu_1, mu_2, mu_3, mu_4);
-
-        const SolveResult base_result = solver.solve(base_grid, base_params);
-        const SolveResult fine_result = solver.solve(fine_grid, fine_params);
+        const SolveResult base_result = solver.solve(input.base_grid, input.base_params);
+        const SolveResult fine_result = solver.solve(fine_grid, input.fine_params);
         const CommonGridDifference difference =
             solver.compare_on_common_nodes(base_result, fine_result);
 
-        std::cout << std::scientific << std::setprecision(10);
-        std::cout << "Справки для основной задачи" << '\n';
-        std::cout << "----------------------------------------" << '\n';
-        print_result("Базовая сетка (n, m)", base_result);
-        std::cout << '\n';
-        print_result("Сетка с половинным шагом (2n, 2m)", fine_result);
-        std::cout << '\n';
-        std::cout << "Точность решения основной задачи epsilon_2 = "
-                  << difference.epsilon2 << '\n';
-        std::cout << "Координаты максимального отклонения: x = " << difference.x
-                  << ", y = " << difference.y << '\n';
-        std::cout << "Индексы узла базовой сетки: i = " << difference.i
-                  << ", j = " << difference.j << '\n';
+        std::cout << make_success_response(input, base_result, fine_result, difference).dump();
     } catch (const std::exception& ex) {
-        std::cerr << "Ошибка: " << ex.what() << '\n';
+        const json error = {{"ok", false}, {"error", ex.what()}};
+        std::cout << error.dump();
         return 1;
     }
 
