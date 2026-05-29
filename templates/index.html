@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Poisson SOR Solver</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">∇²</span>
+        <div>
+          <h1>Poisson SOR</h1>
+          <p>МВР для задачи Дирихле</p>
+        </div>
+      </div>
+
+      <form id="calc-form" class="panel-form">
+        <section class="form-card">
+          <h2>Область</h2>
+          <div class="grid two">
+            <label class="field"><span>a</span><input name="a" type="number" step="any" value="0"></label>
+            <label class="field"><span>b</span><input name="b" type="number" step="any" value="1"></label>
+            <label class="field"><span>c</span><input name="c" type="number" step="any" value="0"></label>
+            <label class="field"><span>d</span><input name="d" type="number" step="any" value="1"></label>
+          </div>
+        </section>
+
+        <section class="form-card">
+          <h2>Сетка и вариант</h2>
+          <div class="grid two">
+            <label class="field"><span>n</span><input name="n" type="number" min="2" value="20"></label>
+            <label class="field"><span>m</span><input name="m" type="number" min="2" value="20"></label>
+          </div>
+          <label class="field full">
+            <span>Вариант</span>
+            <select name="variant">
+              <option value="1">1 — функции из C++ шаблона</option>
+              <option value="2">2 — тест sin(πx)sin(πy)</option>
+              <option value="3">3 — полиномиальные границы</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="form-card">
+          <h2>Основная сетка</h2>
+          <div class="grid two">
+            <label class="field"><span>ω</span><input name="base_omega" type="number" min="0.000001" max="1.999999" step="0.000001" value="1.5"></label>
+            <label class="field"><span>ε<sub>Mem</sub></span><input name="base_epsilon" type="number" min="1e-15" step="any" value="1e-8"></label>
+          </div>
+          <label class="field full"><span>N<sub>max</sub></span><input name="base_max_iterations" type="number" min="1" value="10000"></label>
+        </section>
+
+        <section class="form-card">
+          <h2>Половинная сетка</h2>
+          <div class="grid two">
+            <label class="field"><span>ω₂</span><input name="fine_omega" type="number" min="0.000001" max="1.999999" step="0.000001" value="1.7"></label>
+            <label class="field"><span>ε₂<sub>Mem</sub></span><input name="fine_epsilon" type="number" min="1e-15" step="any" value="1e-8"></label>
+          </div>
+          <label class="field full"><span>N₂<sub>max</sub></span><input name="fine_max_iterations" type="number" min="1" value="20000"></label>
+        </section>
+
+        <button id="calculate-btn" class="primary-button" type="submit">Рассчитать</button>
+      </form>
+    </aside>
+
+    <main class="content">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">FastAPI · Plotly · C++ subprocess</p>
+          <h2>Интерактивная визуализация решения</h2>
+          <p>Запустите расчет, чтобы получить справку, таблицу 4 и 3D-поверхности.</p>
+        </div>
+        <div id="status" class="status idle">Готово</div>
+      </header>
+
+      <section id="log-card" class="card hidden">
+        <h3>Справка для основной задачи</h3>
+        <pre id="log-output"></pre>
+      </section>
+
+      <section id="results" class="card hidden">
+        <div class="toolbar">
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="table" type="button">Таблица</button>
+            <button class="tab" data-tab="graphs1" type="button">Графики 1</button>
+            <button class="tab" data-tab="graphs2" type="button">Графики 2</button>
+            <button class="tab" data-tab="difference" type="button">Разность</button>
+          </div>
+          <div class="selectors">
+            <label>Данные
+              <select id="data-kind">
+                <option value="base">v⁽ᴺ⁾ — основная сетка</option>
+                <option value="fine">v₂⁽ᴺ²⁾ — половинная сетка на общих узлах</option>
+                <option value="difference">v⁽ᴺ⁾ − v₂⁽ᴺ²⁾</option>
+              </select>
+            </label>
+            <label>Таблица
+              <select id="table-stride">
+                <option value="1">каждый узел</option>
+                <option value="2">каждый 2-й</option>
+                <option value="5">каждый 5-й</option>
+                <option value="10">каждый 10-й</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="tab-panel active" id="panel-table">
+          <h3>Таблица 4</h3>
+          <p class="hint">Строки соответствуют j / y<sub>j</sub>, столбцы — i / x<sub>i</sub>.</p>
+          <div class="table-wrap"><table id="result-table"></table></div>
+        </div>
+
+        <div class="tab-panel" id="panel-graphs1">
+          <div class="plot-grid">
+            <div class="plot-card"><h3>v⁽⁰⁾</h3><div id="plot-initial-base" class="plot"></div></div>
+            <div class="plot-card"><h3>v₂⁽⁰⁾</h3><div id="plot-initial-fine" class="plot"></div></div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-graphs2">
+          <div class="plot-card featured-plot">
+            <h3 id="plot-selected-title">Выбранные данные</h3>
+            <div id="plot-selected" class="plot"></div>
+          </div>
+          <div class="plot-grid secondary-plots">
+            <div class="plot-card"><h3>v⁽ᴺ⁾</h3><div id="plot-solution-base" class="plot"></div></div>
+            <div class="plot-card"><h3>v₂⁽ᴺ²⁾</h3><div id="plot-solution-fine" class="plot"></div></div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-difference">
+          <div class="plot-card"><h3>Разность на общих узлах</h3><div id="plot-difference" class="plot"></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
