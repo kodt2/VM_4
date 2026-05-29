@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -49,12 +49,13 @@ class SorPayload(BaseModel):
 
 
 class CalculatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     rectangle: RectanglePayload = Field(default_factory=RectanglePayload)
     grid: GridPayload = Field(default_factory=GridPayload)
     base: SorPayload = Field(default_factory=SorPayload)
     fine: SorPayload = Field(default_factory=lambda: SorPayload(omega=1.7, max_iterations=20000))
     variant: int = Field(1, ge=1, le=3)
-    binary_path: str | None = None
 
 
 def _default_binary_path() -> Path:
@@ -72,17 +73,13 @@ def _default_binary_path() -> Path:
 async def healthz() -> dict[str, Any]:
     binary_path = _default_binary_path()
     if not binary_path.exists():
-        raise HTTPException(status_code=503, detail=f"C++ solver binary is not available: {binary_path}")
-    return {"ok": True, "solver_binary": str(binary_path), "solver_exists": True}
+        raise HTTPException(status_code=503, detail="C++ solver binary is not available")
+    return {"ok": True, "solver_available": True}
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {"default_binary_path": str(_default_binary_path())},
-    )
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.post("/api/calculate")
@@ -90,20 +87,20 @@ async def calculate(payload: CalculatePayload) -> dict[str, Any]:
     if not payload.rectangle.a < payload.rectangle.b or not payload.rectangle.c < payload.rectangle.d:
         raise HTTPException(status_code=422, detail="Требуется a < b и c < d")
 
-    binary_path = Path(payload.binary_path or _default_binary_path()).expanduser()
+    binary_path = _default_binary_path()
     if not binary_path.exists():
         raise HTTPException(
-            status_code=400,
-            detail=f"C++ бинарник не найден: {binary_path}. Соберите проект CMake или укажите путь в форме.",
+            status_code=500,
+            detail="C++ бинарник не найден. Проверьте SOLVER_BINARY_PATH или сборку контейнера.",
         )
 
-    request_json = payload.model_dump(exclude={"binary_path"})
+    request_json = payload.model_dump()
     solver_response = _run_solver(binary_path, request_json)
     if not solver_response.get("ok", False):
         raise HTTPException(status_code=400, detail=solver_response.get("error", "C++ solver returned an error"))
 
     solver_response["plots"] = _build_plotly_payload(solver_response)
-    solver_response["log"] = _build_log(solver_response, binary_path)
+    solver_response["log"] = _build_log(solver_response)
     solver_response["plot_downsampling"] = {"max_axis_points": MAX_SURFACE_AXIS_POINTS}
     return solver_response
 
@@ -238,14 +235,13 @@ def _sample_indices(max_index: int, max_axis_points: int) -> tuple[list[int], in
     return indices, stride
 
 
-def _build_log(response: dict[str, Any], binary_path: Path) -> str:
+def _build_log(response: dict[str, Any]) -> str:
     base = response["base"]
     fine = response["fine"]
     max_node = response["max_difference_node"]
     return "\n".join(
         [
             "Справка для основной задачи",
-            f"C++ бинарник: {binary_path}",
             f"Вариант задачи: {response.get('variant')}",
             "",
             "Основная сетка:",

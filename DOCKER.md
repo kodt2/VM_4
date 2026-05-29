@@ -68,7 +68,7 @@ The container uses these environment variables:
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Uvicorn bind host inside the container. |
 | `PORT` | `8000` | Uvicorn port inside the container. |
-| `SOLVER_BINARY_PATH` | `/app/build/poisson_sor` | Path used by FastAPI when the request does not provide `binary_path`. |
+| `SOLVER_BINARY_PATH` | `/app/build/poisson_sor` | Internal path to the packaged C++ solver. It is configured only by the deployment environment and is never accepted from browser/API payloads. |
 | `MAX_SURFACE_AXIS_POINTS` | `90` | Maximum number of sampled points per axis for server-generated Plotly surfaces. |
 
 The Compose file maps `${APP_PORT:-8000}` on the host to port `8000` inside the container.

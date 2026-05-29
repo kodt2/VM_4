@@ -66,7 +66,6 @@ window.addEventListener('resize', () => resizeVisiblePlots());
 function readPayload() {
   const data = new FormData(form);
   return {
-    binary_path: data.get('binary_path'),
     rectangle: {
       a: Number(data.get('a')),
       b: Number(data.get('b')),
